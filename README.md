@@ -13,7 +13,7 @@ For more details and some use cases, read the
 
 # Overview 
 
-`rdbg` is built arround two components: 
+`rdbg` is built around two components: 
 
 - The `Debugger` struct which allows spawning a processe, running it, placing
 breakpoints, single stepping etc. 
