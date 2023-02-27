@@ -1,0 +1,7 @@
+[workspace]
+
+members = [
+    "rdbg",
+    "examples/crackme_example",
+    "examples/triage_example",
+]
