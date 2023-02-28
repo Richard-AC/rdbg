@@ -228,6 +228,7 @@ impl Debugger {
                                 (bp.cb)(self, *pid, *tid, exception_record);
                                 if bp.permanent {
                                     self.bp_to_replace = Some(*addr as _);
+                                    self.single_step(*tid, true);
                                 }
                             }
                             None => (),
