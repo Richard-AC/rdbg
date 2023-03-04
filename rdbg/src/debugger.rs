@@ -288,6 +288,11 @@ impl Debugger {
                         PostEventAction::Continue(
                             ContinueStatus::DBG_EXCEPTION_NOT_HANDLED)
                     },
+                    // C++ Exception
+                    0xe06d7363 => {
+                        PostEventAction::Continue(
+                            ContinueStatus::DBG_EXCEPTION_NOT_HANDLED)
+                    }
                     code @ _ => {
                         panic!("Unhandled exception {code:#x?}");
                     }
@@ -333,6 +338,7 @@ impl Debugger {
                 let image_name = self.addr_to_mod_name(*base_of_dll);
                 let image_size = self.get_mod_image_size(*base_of_dll);
 
+                self.place_pending_breakpoints(&image_name, *base_of_dll);
                 self.modules.insert(image_name.clone(), *base_of_dll);
                 self.resolve_modules.insert(*base_of_dll as usize, 
                                 (image_name.clone(), *base_of_dll as usize 
@@ -358,7 +364,8 @@ impl Debugger {
                 } else {
                     "".to_string()
                 };
-                println!("{pid}:{tid} {dbgstr}");
+                cbs.dbg_string_cb(self, *pid, *tid, &dbgstr);
+                if DEBUG { println!("{pid}:{tid} {dbgstr}"); }
                 PostEventAction::Continue(ContinueStatus::DBG_CONTINUE)
             }
             DebugEvent::RipInfo { .. } => {

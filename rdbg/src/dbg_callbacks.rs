@@ -35,6 +35,9 @@ pub trait DbgCallbacks {
     fn dll_unload_cb(&mut self, _dbg: &mut Debugger, _pid: u32, _tid: u32, 
                      _base_of_dll: *mut c_void) {}
 
+    fn dbg_string_cb(&mut self, _dbg: &mut Debugger, _pid: u32, _tid: u32, 
+                     _dbg_string: &str) {}
+
     fn access_violation_cb(&mut self, _dbg: &mut Debugger, _pid: u32, _tid: u32,
                            _exception: &EXCEPTION_RECORD,
                            _first_chance_: bool) {}
