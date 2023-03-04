@@ -3,6 +3,7 @@
 
 use std::ffi::{CString, c_void};
 use std::collections::{HashMap, HashSet, BTreeMap};
+use std::mem::size_of;
 
 use crate::windows::{HANDLE, Handle, PROCESS_CREATION_FLAGS, ContinueStatus, 
     DebugEvent, EXCEPTION_RECORD};
@@ -463,6 +464,12 @@ impl Debugger {
         bytes_written
     }
 
+    pub fn read_primitive<T: Primitive>(&self, addr: *const u8) -> T {
+        let mut ret = T::default();
+        self.read_mem(addr, ret.cast_mut());
+        ret
+    }
+
     /// Attempts to resolve the provided address to (module_name, offset).
     /// If `addr` cannot be resolved, this will return ("", addr)
     pub fn resolve_addr(&self, addr: *const c_void) -> (String, usize) {
@@ -506,9 +513,8 @@ impl Debugger {
         self.read_mem(module_base as _, &mut mz_magic);
         assert!(mz_magic == [0x4D, 0x5A], "Invalid DOS header magic");
 
-        let mut pe_header_off = [0u8; 4];
-        self.read_mem((module_base as usize + 0x3C) as _, &mut pe_header_off);
-        let pe_header_off = u32::from_le_bytes(pe_header_off);
+        let pe_header_off: u32 = self.read_primitive(
+                                        (module_base as usize + 0x3C) as _);
 
         let pe_header = module_base as usize + pe_header_off as usize;
         let mut pe_magic = [0u8; 4];
@@ -516,9 +522,7 @@ impl Debugger {
 
         assert!(pe_magic == [0x50, 0x45, 0, 0], "Invalid PE header magic");
 
-        let mut size_of_image = [0u8; 4];
-        self.read_mem((pe_header + 0x50) as _, &mut size_of_image);
-        let size_of_image = u32::from_le_bytes(size_of_image);
+        let size_of_image: u32 = self.read_primitive((pe_header + 0x50) as _);
         size_of_image
     }
 
@@ -541,12 +545,11 @@ impl Debugger {
     // Actually place a breakpoint (overwrite the addr with 0xcc etc.)
     fn place_breakpoint(&mut self, addr: *mut c_void, 
                         cb: Box<BreakpointCallback>, permanent: bool) {
-        let mut overwritten_byte = [0u8];
-        self.read_mem(addr as _, &mut overwritten_byte);
+        let overwritten_byte: u8 = self.read_primitive(addr as _);
         self.write_mem(addr as _, &[0xcc]);
         self.flush_instruction_caches();
         self.breakpoints.insert(addr, 
-            Breakpoint::new(addr, overwritten_byte[0], cb, permanent));
+            Breakpoint::new(addr, overwritten_byte, cb, permanent));
     }
 
     fn place_pending_breakpoints(&mut self, modname: &str, base: *mut c_void) {
@@ -609,16 +612,12 @@ impl Debugger {
                     2 => c.R8,
                     3 => c.R9,
                     i @ _ => {
-                        let mut arg = [0u8; 8];
-                        self.read_mem((c.Rsp as usize + 8 * (i + 1)) as _, &mut arg);
-                        u64::from_le_bytes(arg)
+                        self.read_primitive::<u64>((c.Rsp as usize + 8 * (i + 1)) as _)
                     }
                 }
             }
             Context::Wow64(c) => {
-                let mut arg = [0u8; 4];
-                self.read_mem((c.Esp as usize + 4 * (n + 1)) as _, &mut arg);
-                u32::from_le_bytes(arg) as u64
+                self.read_primitive::<u32>((c.Esp as usize + 4 * (n + 1)) as _) as _
             }
         }
     }
@@ -630,14 +629,10 @@ impl Debugger {
         self.get_context(tid);
         match &self.context {
             Context::Native(c) => {
-                let mut ret = [0u8; 8];
-                self.read_mem(c.Rsp as _, &mut ret);
-                u64::from_le_bytes(ret)
+                self.read_primitive::<u64>(c.Rsp as _)
             }
             Context::Wow64(c) => {
-                let mut ret = [0u8; 4];
-                self.read_mem(c.Esp as _, &mut ret);
-                u32::from_le_bytes(ret) as u64
+                self.read_primitive::<u32>(c.Esp as _) as _
             }
         }
     }
@@ -648,3 +643,42 @@ impl Debugger {
         self.context.get_acc()
     }
 }
+
+/// Cast between Primitive types and slices to make reading more natural. 
+// Credit:
+// https://github.com/gamozolabs/chocolate_milk/blob/master/kernel/src/fuzz_session.rs#L62
+pub unsafe trait Primitive: Default + Sized {
+    fn cast(&self) -> &[u8];
+    fn cast_mut(&mut self) -> &mut [u8];
+}
+
+macro_rules! primitive {
+    ($ty:ty) => {
+        unsafe impl Primitive for $ty {
+            fn cast(&self) -> &[u8] {
+                unsafe {
+                    core::slice::from_raw_parts(
+                        self as *const $ty as *const u8, size_of::<$ty>())
+                }
+            }
+
+            fn cast_mut(&mut self) -> &mut [u8] {
+                unsafe {
+                    core::slice::from_raw_parts_mut(
+                        self as *mut $ty as *mut u8, size_of::<$ty>())
+                }
+            }
+        }
+    }
+}
+
+primitive!(u8);
+primitive!(u16);
+primitive!(u32);
+primitive!(u64);
+primitive!(u128);
+primitive!(i8);
+primitive!(i16);
+primitive!(i32);
+primitive!(i64);
+primitive!(i128);
