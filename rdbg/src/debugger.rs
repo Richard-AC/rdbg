@@ -16,7 +16,7 @@ use crate::context::Context;
 /// is zero, the function tests for a debugging event and returns immediately. 
 /// If the parameter is u32::MAX, the function does not return until a 
 /// debugging event has occurred.
-const DEBUGGER_TIMEOUT: u32 = 1000;
+const DEBUGGER_TIMEOUT: u32 = 5000;
 
 /// Whether to print a message for every debug event received
 const DEBUG: bool = false;
@@ -97,7 +97,7 @@ pub struct Debugger {
     /// every time we need to access a thread context.
     context: Context,
     /// Map: IP -> Breakpoint
-    breakpoints: Option<HashMap<*mut c_void, Breakpoint>>,
+    breakpoints: HashMap<*mut c_void, Breakpoint>,
     /// Breakpoints requested before the corresponding module was loaded. 
     /// They will be registered when the module is loaded.
     /// module_name -> Vec<off, callback, permanent>
@@ -176,7 +176,7 @@ impl Debugger {
             thread_handles: thread_handles,
             modules: HashMap::new(),
             resolve_modules: BTreeMap::new(),
-            breakpoints: Some(HashMap::new()),
+            breakpoints: HashMap::new(),
             pending_breakpoints: HashMap::new(),
             context: Context::new(is_wow64),
             single_stepping: HashSet::new(),
@@ -216,26 +216,30 @@ impl Debugger {
                                         ContinueStatus::DBG_CONTINUE);
                         }
 
-                        let mut breakpoints = self.breakpoints.take().unwrap();
                         let addr = &exception_record.ExceptionAddress;
-
                         self.set_ip(*tid, *addr as u64);
-                        match breakpoints.get_mut(addr) {
-                            Some(bp) => {
+
+                        match self.breakpoints.remove(addr){
+                            Some(mut bp) => {
                                 // Restore the overwritten instruction
                                 self.write_mem(bp.addr as _, &[bp.overwritten_byte]);
                                 self.flush_instruction_caches();
+                                // Call the callback
                                 (bp.cb)(self, *pid, *tid, exception_record);
+                                // If permanent, restore the bp
                                 if bp.permanent {
+                                    // Place back the bp
+                                    self.breakpoints.insert(*addr, bp);
                                     self.bp_to_replace = Some(*addr as _);
                                     self.single_step(*tid, true);
                                 }
                             }
-                            None => (),
+                            None => {
+                                return PostEventAction::Continue(
+                                    ContinueStatus::DBG_EXCEPTION_NOT_HANDLED);
+                            },
                         }
 
-                        // Put back
-                        self.breakpoints = Some(breakpoints);
                         PostEventAction::Continue(ContinueStatus::DBG_CONTINUE)
                     }
                     // Single step / STATUS_WX86_SINGLE_STEP
@@ -541,7 +545,7 @@ impl Debugger {
         self.read_mem(addr as _, &mut overwritten_byte);
         self.write_mem(addr as _, &[0xcc]);
         self.flush_instruction_caches();
-        self.breakpoints.as_mut().unwrap().insert(addr, 
+        self.breakpoints.insert(addr, 
             Breakpoint::new(addr, overwritten_byte[0], cb, permanent));
     }
 
@@ -553,7 +557,7 @@ impl Debugger {
         }
     }
 
-    /// Registers a breakpoint at address <module>+off
+    /// Registers a breakpoint at address `<module>+off`
     /// Upon reaching the address, the closure `cb` will be invoked. 
     /// If `permanent` is false, the breakpoint is deleted after it's hit once
     /// If `permanent` is true, the breakpoint triggers every time the address
@@ -578,6 +582,12 @@ impl Debugger {
         }
     }
 
+    /// Registers a breakpoint at address `<addr>`
+    pub fn register_absolute_breakpoint(&mut self, addr: usize, 
+                           cb: Box<BreakpointCallback>, permanent: bool) {
+        self.place_breakpoint(addr as _, cb, permanent)
+    }
+
     fn flush_instruction_caches(&self) {
         unsafe {
             assert!(FlushInstructionCache(self.process_handle, 
@@ -585,5 +595,56 @@ impl Debugger {
                     "FlushInstructionCache failed with {}", 
                     std::io::Error::last_os_error());
         }
+    }
+
+    /// Get the nth argument. This assumes that the function was just called
+    /// i.e the stack pointer currently points at the return address.
+    pub fn get_arg(&mut self, tid: u32, n: usize) -> u64 {
+        self.get_context(tid);
+        match &self.context {
+            Context::Native(c) => {
+                match n {
+                    0 => c.Rcx,
+                    1 => c.Rdx,
+                    2 => c.R8,
+                    3 => c.R9,
+                    i @ _ => {
+                        let mut arg = [0u8; 8];
+                        self.read_mem((c.Rsp as usize + 8 * (i + 1)) as _, &mut arg);
+                        u64::from_le_bytes(arg)
+                    }
+                }
+            }
+            Context::Wow64(c) => {
+                let mut arg = [0u8; 4];
+                self.read_mem((c.Esp as usize + 4 * (n + 1)) as _, &mut arg);
+                u32::from_le_bytes(arg) as u64
+            }
+        }
+    }
+
+
+    /// Get the return address. This assumes that the function was just called
+    /// i.e the stack pointer currently points at the return address.
+    pub fn get_ret_addr(&mut self, tid: u32) -> u64 {
+        self.get_context(tid);
+        match &self.context {
+            Context::Native(c) => {
+                let mut ret = [0u8; 8];
+                self.read_mem(c.Rsp as _, &mut ret);
+                u64::from_le_bytes(ret)
+            }
+            Context::Wow64(c) => {
+                let mut ret = [0u8; 4];
+                self.read_mem(c.Esp as _, &mut ret);
+                u32::from_le_bytes(ret) as u64
+            }
+        }
+    }
+
+    /// Get the return value from a function
+    pub fn get_ret_val(&mut self, tid: u32) -> u64 {
+        self.get_context(tid);
+        self.context.get_acc()
     }
 }

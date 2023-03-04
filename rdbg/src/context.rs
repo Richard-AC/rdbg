@@ -282,6 +282,19 @@ impl Context {
         }
     }
 
+    /// Get the instruction pointer
+    pub fn get_ip(&mut self) -> u64 {
+        match self {
+            Self::Native(c) => {
+                c.Rip
+            }
+            Self::Wow64(c) => {
+                c.Eip as u64
+            }
+        }
+    }
+
+    /// Set the instruction pointer
     pub fn set_ip(&mut self, ip: u64) {
         match self {
             Self::Native(ref mut c) => {
@@ -289,6 +302,54 @@ impl Context {
             }
             Self::Wow64(ref mut c) => {
                 c.Eip = ip as u32;
+            }
+        }
+    }
+
+    /// Get the stack pointer
+    pub fn get_sp(&mut self) -> u64 {
+        match self {
+            Self::Native(c) => {
+                c.Rsp
+            }
+            Self::Wow64(c) => {
+                c.Esp as u64
+            }
+        }
+    }
+
+    /// Set the stack pointer
+    pub fn set_sp(&mut self, sp: u64) {
+        match self {
+            Self::Native(ref mut c) => {
+                c.Rsp = sp;
+            }
+            Self::Wow64(ref mut c) => {
+                c.Esp = sp as u32;
+            }
+        }
+    }
+
+    /// Get the accumulator register (Eax / Rax)
+    pub fn get_acc(&mut self) -> u64 {
+        match self {
+            Self::Native(c) => {
+                c.Rax
+            }
+            Self::Wow64(c) => {
+                c.Eax as u64
+            }
+        }
+    }
+
+    /// Set the accumulator register (Eax / Rax)
+    pub fn set_acc(&mut self, acc: u64) {
+        match self {
+            Self::Native(ref mut c) => {
+                c.Rax = acc;
+            }
+            Self::Wow64(ref mut c) => {
+                c.Eax = acc as u32;
             }
         }
     }
