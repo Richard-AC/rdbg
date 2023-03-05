@@ -277,7 +277,7 @@ pub fn create_pipe() -> (Handle, Handle) {
     unsafe {
         assert!(CreatePipe(&mut r_handle, &mut w_handle, 
                            &mut sa as *mut SECURITY_ATTRIBUTES as _, 0),
-                "CreatePipe Failed with {}", std::io::Error::last_os_error());
+                "CreatePipe failed with {:#x?}", std::io::Error::last_os_error());
     }
 
     assert!(r_handle != 0 && w_handle != 0, 
@@ -296,7 +296,7 @@ pub fn read_file(h: &Handle, buf: &mut [u8]) {
     unsafe {
         assert!(ReadFile(h.0, buf.as_ptr() as _, buf.len() as u32, 
                           &mut bytes_written, std::ptr::null()),
-                "ReadFile Failed with {}", std::io::Error::last_os_error());
+                "ReadFile failed with {:#x?}", std::io::Error::last_os_error());
     }
 }
 
@@ -305,7 +305,7 @@ pub fn write_file(h: &Handle, buf: &[u8]) {
     unsafe {
         assert!(WriteFile(h.0, buf.as_ptr() as _, buf.len() as u32, 
                           &mut bytes_written, std::ptr::null()),
-                "WriteFile Failed with {}", std::io::Error::last_os_error());
+                "WriteFile failed with {:#x?}", std::io::Error::last_os_error());
     }
 }
 
@@ -314,7 +314,7 @@ pub fn get_file_size(h: HANDLE) -> u64 {
     let mut size = 0;
     unsafe {
         assert!(GetFileSizeEx(h, &mut size), 
-            "GetFileSizeEx Failed with {}", std::io::Error::last_os_error());
+            "GetFileSizeEx failed with {:#x?}", std::io::Error::last_os_error());
     }
     size as u64
 }
@@ -404,4 +404,187 @@ extern "system" {
         lpv         : *const c_void, 
         lpFilename  : LPWSTR,
         nSize       : u32) -> u32;
+}
+
+/// Used by `StackWalk64`  
+#[repr(u32)]
+#[derive(Clone, Copy)]
+#[allow(unused)]
+enum MACHINE_TYPE {
+    IMAGE_FILE_MACHINE_I386  = 0x014c,
+    //IMAGE_FILE_MACHINE_IA64  = 0x0200,
+    IMAGE_FILE_MACHINE_AMD64 = 0x8664,
+}
+
+/// Used by `StackWalk64`
+#[repr(u32)]
+#[allow(unused)]
+enum ADDRESS_MODE {
+    AddrMode1616 = 0,
+    AddrMode1632 = 1,
+    AddrModeReal = 2,
+    AddrModeFlat = 3,
+}
+
+impl Default for ADDRESS_MODE {
+    fn default() -> Self {
+        ADDRESS_MODE::AddrModeFlat
+    }
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct ADDRESS64 {
+    Offset:     u64,
+    Segment:    u16,
+    Mode:       ADDRESS_MODE
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct KDHELP64 {
+    Thread: u64,
+    ThCallbackStack: u32,
+    ThCallbackBStore: u32,
+    NextCallback: u32,
+    FramePointer: u32,
+    KiCallUserMode: u64,
+    KeUserCallbackDispatcher: u64,
+    SystemRangeStart: u64,
+    KiUserExceptionDispatcher: u64,
+    StackBase: u64,
+    StackLimit: u64,
+    BuildVersion: u32,
+    RetpolineStubFunctionTableSize: u32,
+    RetpolineStubFunctionTable: u64,
+    RetpolineStubOffset: u32,
+    RetpolineStubSize: u32,
+    Reserved0: [u64; 2],
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct STACKFRAME64 {
+    AddrPC: ADDRESS64,
+    AddrReturn: ADDRESS64,
+    AddrFrame: ADDRESS64,
+    AddrStack: ADDRESS64,
+    AddrBStore: ADDRESS64,
+    FuncTableEntry: usize, //*mut c_void,
+    Params: [u64; 4],
+    Far: bool,
+    Virtual: bool,
+    Reserved: [u64; 3],
+    KdHelp: KDHELP64,
+}
+
+#[link(name="dbghelp")]
+extern "system" {
+    fn StackWalk64(
+        MachineType: MACHINE_TYPE,
+        hProcess: HANDLE,
+        hThread: HANDLE,
+        StackFrame: *mut STACKFRAME64,
+        ContextRecord: *mut c_void,
+        ReadMemoryRoutine: *const c_void,
+        FunctionTableAccessRoutine: *const c_void,
+        GetModuleBaseRoutine: *const c_void,
+        TranslateAddress: *const c_void) -> bool;
+
+    fn SymInitialize(
+        hProcess: HANDLE,
+        UserSearchPath: LPCSTR,
+        fInvadeProcess: bool) -> bool;
+
+    fn SymRefreshModuleList(hProcess: HANDLE) -> bool;
+
+    fn SymFunctionTableAccess64 (
+        hProcess: HANDLE,
+        AddrBase: u64) -> *const c_void;
+
+    fn SymGetModuleBase64(
+        hProcess: HANDLE,
+        qwAddr: u64) -> u64;
+}
+
+use crate::context::Context;
+
+pub fn stackwalk(hProcess: HANDLE, hThread: HANDLE, context: &mut Context) 
+    -> Vec<u64> {
+    let mut stackframe = STACKFRAME64::default();
+    let machine_type;
+    let context_ptr;
+
+    match context {
+        Context::Native(ref mut c) => {
+            machine_type = MACHINE_TYPE::IMAGE_FILE_MACHINE_AMD64;
+            context_ptr = c as *mut crate::context::CONTEXT as *mut c_void;
+
+            stackframe.AddrPC.Offset = c.Rip;
+            stackframe.AddrPC.Mode = ADDRESS_MODE::AddrModeFlat;
+
+            stackframe.AddrStack.Offset = c.Rsp;
+            stackframe.AddrStack.Mode = ADDRESS_MODE::AddrModeFlat;
+
+            stackframe.AddrFrame.Offset = c.Rbp;
+            stackframe.AddrFrame.Mode = ADDRESS_MODE::AddrModeFlat;
+        }
+        Context::Wow64(ref mut c) => {
+            machine_type = MACHINE_TYPE::IMAGE_FILE_MACHINE_I386;
+            context_ptr = c as *mut crate::context::WOW64_CONTEXT as *mut c_void;
+
+            stackframe.AddrPC.Offset = c.Eip as u64;
+            stackframe.AddrPC.Mode = ADDRESS_MODE::AddrModeFlat;
+
+            stackframe.AddrStack.Offset = c.Esp as u64;
+            stackframe.AddrStack.Mode = ADDRESS_MODE::AddrModeFlat;
+
+            stackframe.AddrFrame.Offset = c.Ebp as u64;
+            stackframe.AddrFrame.Mode = ADDRESS_MODE::AddrModeFlat;
+        }
+    }
+
+    let mut r = Vec::new();
+
+    unsafe {
+        while StackWalk64(
+            machine_type,
+            hProcess,
+            hThread,
+            &mut stackframe,
+            context_ptr,
+            std::ptr::null_mut(),
+            SymFunctionTableAccess64 as _,
+            SymGetModuleBase64 as _,
+            std::ptr::null_mut()) {
+            r.push(stackframe.AddrPC.Offset);
+        }
+    }
+
+    r
+}
+
+pub fn initialize_symbol_server(hProcess: HANDLE) -> bool {
+    // Initialize the symbol handler
+    let r = unsafe { SymInitialize(hProcess, std::ptr::null_mut(), true) };
+
+    if !r {
+        eprintln!("SymInitialize failed with {:#x?}. Stacktraces may be wrong", 
+                  std::io::Error::last_os_error());
+    }
+    
+    r
+}
+
+/// Refreshes the module list for the process.
+pub fn refresh_symbol_server(hProcess: HANDLE) -> bool {
+    let r = unsafe { SymRefreshModuleList(hProcess) };
+
+    // NOTE the return value of `SymRefreshModuleList` doesn't seem reliable
+    if !r && std::io::Error::last_os_error().raw_os_error().unwrap() != 0 {
+        eprintln!("SymRefreshModuleList failed with {:#x?}",
+                  std::io::Error::last_os_error());
+    }
+    
+    r
 }

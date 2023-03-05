@@ -107,7 +107,8 @@ pub struct Debugger {
     single_stepping: HashSet<u32>,
     child_io: Option<ChildIo>,
     /// If Some, 0xCC will be written to that address on the next single step
-    bp_to_replace: Option<*mut u8>
+    bp_to_replace: Option<*mut u8>,
+    initialized_symserver: bool,
 }
 
 impl Debugger {
@@ -152,7 +153,7 @@ impl Debugger {
                 std::ptr::null_mut(), // lpCurrentDirectory
                 &mut startup_info, // lpStartupInfo
                 proc_info.as_mut_ptr()), // lpProcessInformation
-            "CreateProcessA failed with {}", std::io::Error::last_os_error());
+            "CreateProcessA failed with {:#x?}", std::io::Error::last_os_error());
 
             // CreateProcessA successfully initialized the structure
             proc_info.assume_init()
@@ -165,16 +166,16 @@ impl Debugger {
 
         unsafe { 
             assert!(IsWow64Process(proc_info.hProcess, &mut is_wow64),
-            "IsWow64Process failed with {}", std::io::Error::last_os_error());
+            "IsWow64Process failed with {:#x?}", std::io::Error::last_os_error());
         }
 
         if let Some(data) = stdin {
             windows::write_file(&child_io.as_ref().unwrap().stdin_write, data.as_bytes());
         }
-
+        
         Self {
             process_handle: proc_info.hProcess,
-            thread_handles: thread_handles,
+            thread_handles,
             modules: HashMap::new(),
             resolve_modules: BTreeMap::new(),
             breakpoints: HashMap::new(),
@@ -183,6 +184,7 @@ impl Debugger {
             single_stepping: HashSet::new(),
             bp_to_replace: None,
             child_io,
+            initialized_symserver: false,
         }
     }
 
@@ -349,6 +351,10 @@ impl Debugger {
                                 (image_name.clone(), *base_of_dll as usize 
                                              + image_size as usize - 1));
 
+                if self.initialized_symserver {
+                    windows::refresh_symbol_server(self.process_handle);
+                }
+
                 cbs.dll_load_cb(self, *pid, *tid, &image_name, *base_of_dll);
                 PostEventAction::Continue(ContinueStatus::DBG_CONTINUE)
             }
@@ -401,7 +407,7 @@ impl Debugger {
 
                     unsafe { 
                         assert!(ContinueDebugEvent(pid, tid, status),
-                            "ContinueDebugEvent failed with {}", 
+                            "ContinueDebugEvent failed with {:#x?}", 
                             std::io::Error::last_os_error());
                     }
                 } 
@@ -445,7 +451,7 @@ impl Debugger {
         unsafe { 
             assert!(ReadProcessMemory(self.process_handle, addr, 
                           buf.as_mut_ptr(), buf.len(), &mut bytes_read),
-                    "ReadProcessMemory failed with {}", 
+                    "ReadProcessMemory failed with {:#x?}", 
                     std::io::Error::last_os_error());
         }
         bytes_read
@@ -458,7 +464,7 @@ impl Debugger {
         unsafe { 
             assert!(WriteProcessMemory(self.process_handle, addr, 
                           buf.as_ptr(), buf.len(), &mut bytes_written),
-                    "WriteProcessMemory failed with {}", 
+                    "WriteProcessMemory failed with {:#x?}", 
                     std::io::Error::last_os_error());
         }
         bytes_written
@@ -533,7 +539,7 @@ impl Debugger {
                                buf.len() as u32)
         };
         assert!(len != 0 && (len as usize) < buf.len(), 
-                "GetMappedFileNameW failed with {}", 
+                "GetMappedFileNameW failed with {:#x?}", 
                 std::io::Error::last_os_error());
 
         let path = String::from_utf16(&buf[..len as usize]).unwrap();
@@ -595,7 +601,7 @@ impl Debugger {
         unsafe {
             assert!(FlushInstructionCache(self.process_handle, 
                                           std::ptr::null(), 0),
-                    "FlushInstructionCache failed with {}", 
+                    "FlushInstructionCache failed with {:#x?}", 
                     std::io::Error::last_os_error());
         }
     }
@@ -642,9 +648,24 @@ impl Debugger {
         self.get_context(tid);
         self.context.get_acc()
     }
+
+    pub fn stacktrace(&mut self, tid: u32) -> Vec<u64> {
+        if !self.initialized_symserver {
+            if windows::initialize_symbol_server(self.process_handle) {
+                self.initialized_symserver = true;
+            }
+        }
+
+        self.get_context(tid);
+
+        windows::stackwalk(
+            self.process_handle,
+            self.thread_handles[&tid],
+            &mut self.context)
+    }
 }
 
-/// Cast between Primitive types and slices to make reading more natural. 
+/// Cast between Primitive types and slices to make reading memory more natural
 // Credit:
 // https://github.com/gamozolabs/chocolate_milk/blob/master/kernel/src/fuzz_session.rs#L62
 pub unsafe trait Primitive: Default + Sized {

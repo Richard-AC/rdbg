@@ -283,7 +283,7 @@ impl Context {
     }
 
     /// Get the instruction pointer
-    pub fn get_ip(&mut self) -> u64 {
+    pub fn get_ip(&self) -> u64 {
         match self {
             Self::Native(c) => {
                 c.Rip
@@ -307,7 +307,7 @@ impl Context {
     }
 
     /// Get the stack pointer
-    pub fn get_sp(&mut self) -> u64 {
+    pub fn get_sp(&self) -> u64 {
         match self {
             Self::Native(c) => {
                 c.Rsp
@@ -331,7 +331,7 @@ impl Context {
     }
 
     /// Get the accumulator register (Eax / Rax)
-    pub fn get_acc(&mut self) -> u64 {
+    pub fn get_acc(&self) -> u64 {
         match self {
             Self::Native(c) => {
                 c.Rax
