@@ -32,21 +32,21 @@ const PIPE_STDERR: bool = false;
 
 /// Type of the closure called when a breakpoint is hit.
 /// Arguments are: (dbg: Debugger, pid: u32, tid: u32, exception: EXCEPTION_RECORD)
-pub type BreakpointCallback = dyn FnMut(&mut Debugger, u32, u32, &EXCEPTION_RECORD);
+pub type BreakpointCallback<'a> = dyn FnMut(&mut Debugger, u32, u32, &EXCEPTION_RECORD) + 'a;
 
-struct Breakpoint {
+struct Breakpoint<'a> {
     addr: *mut c_void,
     /// The byte that was overwritten with 0xCC
     overwritten_byte: u8,
-    cb: Box<BreakpointCallback>,
+    cb: Box<BreakpointCallback<'a>>,
     // If `false`, this breakpoint gets deleted after the first hit 
     // If `true`, the breakpoint is triggered every time `addr` is reached
     permanent: bool,
 }
 
-impl Breakpoint {
+impl<'a> Breakpoint<'a> {
     fn new(addr: *mut c_void, overwritten_byte: u8,
-           cb: Box<BreakpointCallback>, permanent: bool) -> Self {
+           cb: Box<BreakpointCallback<'a>>, permanent: bool) -> Self {
         Self {
             addr,
             overwritten_byte,
@@ -87,7 +87,7 @@ impl ChildIo {
     }
 }
 
-pub struct Debugger {
+pub struct Debugger<'a> {
     process_handle: HANDLE,
     thread_handles: HashMap<u32, HANDLE>,
     modules: HashMap<String, *const c_void>,
@@ -98,11 +98,11 @@ pub struct Debugger {
     /// every time we need to access a thread context.
     context: Context,
     /// Map: IP -> Breakpoint
-    breakpoints: HashMap<*mut c_void, Breakpoint>,
+    breakpoints: HashMap<*mut c_void, Breakpoint<'a>>,
     /// Breakpoints requested before the corresponding module was loaded. 
     /// They will be registered when the module is loaded.
     /// module_name -> Vec<off, callback, permanent>
-    pending_breakpoints: HashMap<String, Vec<(usize, Box<BreakpointCallback>, bool)>>,
+    pending_breakpoints: HashMap<String, Vec<(usize, Box<BreakpointCallback<'a>>, bool)>>,
     /// Set of TIDs that are currently single stepping
     single_stepping: HashSet<u32>,
     child_io: Option<ChildIo>,
@@ -111,7 +111,7 @@ pub struct Debugger {
     initialized_symserver: bool,
 }
 
-impl Debugger {
+impl<'a> Debugger<'a> {
     /// Spawn a new process under the debugger.
     /// NOTE `cmdline` includes the program path
     /// e.g cmdline = ["program_path", "arg1", "arg2", "arg3"]
@@ -295,8 +295,13 @@ impl Debugger {
                         PostEventAction::Continue(
                             ContinueStatus::DBG_EXCEPTION_NOT_HANDLED)
                     },
-                    // C++ Exception
+                    // C++ Exception SVL_MSVC_EXCEPTION
                     0xe06d7363 => {
+                        PostEventAction::Continue(
+                            ContinueStatus::DBG_EXCEPTION_NOT_HANDLED)
+                    }
+                    // SVL_THREAD_NAMING_EXCEPTION
+                    0x406D1388 => {
                         PostEventAction::Continue(
                             ContinueStatus::DBG_EXCEPTION_NOT_HANDLED)
                     }
@@ -347,6 +352,7 @@ impl Debugger {
 
                 self.place_pending_breakpoints(&image_name, *base_of_dll);
                 self.modules.insert(image_name.clone(), *base_of_dll);
+                if DEBUG { println!("Loading : {image_name}"); }
                 self.resolve_modules.insert(*base_of_dll as usize, 
                                 (image_name.clone(), *base_of_dll as usize 
                                              + image_size as usize - 1));
@@ -550,7 +556,7 @@ impl Debugger {
 
     // Actually place a breakpoint (overwrite the addr with 0xcc etc.)
     fn place_breakpoint(&mut self, addr: *mut c_void, 
-                        cb: Box<BreakpointCallback>, permanent: bool) {
+                        cb: Box<BreakpointCallback<'a>>, permanent: bool) {
         let overwritten_byte: u8 = self.read_primitive(addr as _);
         self.write_mem(addr as _, &[0xcc]);
         self.flush_instruction_caches();
@@ -572,7 +578,7 @@ impl Debugger {
     /// If `permanent` is true, the breakpoint triggers every time the address
     /// is reached.
     pub fn register_breakpoint(&mut self, module: &str, off: usize, 
-                           cb: Box<BreakpointCallback>, permanent: bool) {
+                           cb: Box<BreakpointCallback<'a>>, permanent: bool) {
         match self.modules.get(module) {
             Some(base) => {
                 self.place_breakpoint((*base as usize + off) as _, cb, permanent)
@@ -593,7 +599,7 @@ impl Debugger {
 
     /// Registers a breakpoint at address `<addr>`
     pub fn register_absolute_breakpoint(&mut self, addr: usize, 
-                           cb: Box<BreakpointCallback>, permanent: bool) {
+                           cb: Box<BreakpointCallback<'a>>, permanent: bool) {
         self.place_breakpoint(addr as _, cb, permanent)
     }
 
